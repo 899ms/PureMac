@@ -24,8 +24,7 @@ enum Purger {
         var byProject: [String: [ScanItem]] = [:]
         var order: [String] = []
 
-        for root in roots where Safety.isValidScanRoot(root).ok {
-            let rootURL = URL(fileURLWithPath: root).resolvingSymlinksInPath()
+        for rootURL in scanRoots(roots) {
             guard let en = fm.enumerator(at: rootURL,
                                          includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
                                          options: [.skipsPackageDescendants],
@@ -37,16 +36,21 @@ enum Purger {
                 if vals?.isSymbolicLink == true { en.skipDescendants(); continue }
                 guard vals?.isDirectory == true else { continue }
                 if en.level > 8 { en.skipDescendants(); continue }
-                if Safety.isProviderOwned(url.path) || ignore.isIgnored(url.path) { en.skipDescendants(); continue }
+                if Safety.isCloudOrDataless(url.path) || Safety.isPathIgnored(url.path, ignore: ignore) {
+                    en.skipDescendants()
+                    continue
+                }
 
                 if isArtifact(name) {
                     en.skipDescendants()
-                    let size = DirSizer.size(of: url.path)
-                    guard size >= CategoryScanner.minSize else { continue }
+                    if Safety.ignoredPathProtectsCandidate(url.path, ignore: ignore) { continue }
+                    let measurement = DirSizer.measure(of: url.path)
+                    guard measurement.status == .complete,
+                          measurement.bytes >= CategoryScanner.minSize else { continue }
                     let mod = DirSizer.modified(of: url.path)
                     let old = (mod ?? .distantFuture) < cutoff
                     let project = projectLabel(url, level: en.level, root: rootURL)
-                    let item = ScanItem(path: url.path, sizeBytes: size, modified: mod, selected: old)
+                    let item = ScanItem(path: url.path, sizeBytes: measurement.bytes, modified: mod, selected: old)
                     byProject[project, default: []].append(item)
                     if !order.contains(project) { order.append(project) }
                 }
@@ -57,6 +61,20 @@ enum Purger {
             ToolGroup(tool: proj, items: byProject[proj]!.sorted { $0.sizeBytes > $1.sizeBytes })
         }.sorted { $0.allBytes > $1.allBytes }
         return CategoryScan(id: "purge", title: "Project Artifacts", groups: groups)
+    }
+
+    static func scanRoots(_ roots: [String]) -> [URL] {
+        let candidates = roots.compactMap { root -> URL? in
+            guard Safety.isValidScanRoot(root).ok else { return nil }
+            return URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL
+        }.sorted { $0.path.count < $1.path.count }
+        var accepted: [URL] = []
+        for candidate in candidates where !accepted.contains(where: {
+            candidate.path == $0.path || candidate.path.hasPrefix($0.path + "/")
+        }) {
+            accepted.append(candidate)
+        }
+        return accepted
     }
 
     private static func projectLabel(_ url: URL, level: Int, root: URL) -> String {

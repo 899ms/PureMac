@@ -7,6 +7,18 @@ on:
     branches: [main]
 
 jobs:
+  cli:
+    name: CLI tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test CLI
+        working-directory: cli
+        run: swift test
+      - name: Build CLI
+        working-directory: cli
+        run: swift build -c release
+
   build:
     runs-on: macos-15
     steps:

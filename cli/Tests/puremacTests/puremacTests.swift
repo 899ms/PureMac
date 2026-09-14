@@ -75,7 +75,8 @@ final class PureMacTests: XCTestCase {
         try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
-        var ig = IgnoreStore()
+        let ignoreFile = URL(fileURLWithPath: tmp).appendingPathComponent("ignore")
+        var ig = try IgnoreStore(fileURL: ignoreFile)
 
         XCTAssertTrue(Safety.canRemove(tmp, ignore: ig).ok)
         _ = try ig.add(tmp)

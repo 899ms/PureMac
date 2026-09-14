@@ -1,12 +1,56 @@
 import Foundation
 
+struct FileIdentity: Hashable, Sendable {
+    let device: UInt64
+    let inode: UInt64
+}
+
 struct ScanItem: Codable {
     let path: String
     let sizeBytes: Int64
     let modified: Date?
+    let identity: FileIdentity?
 
     var selected: Bool = true
     var human: String { ByteCount.human(sizeBytes) }
+
+    init(
+        path: String,
+        sizeBytes: Int64,
+        modified: Date?,
+        identity: FileIdentity? = nil,
+        selected: Bool = true
+    ) {
+        self.path = path
+        self.sizeBytes = sizeBytes
+        self.modified = modified
+        self.identity = identity ?? Safety.fileIdentity(at: path)
+        self.selected = selected
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path
+        case sizeBytes
+        case modified
+        case selected
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        path = try values.decode(String.self, forKey: .path)
+        sizeBytes = try values.decode(Int64.self, forKey: .sizeBytes)
+        modified = try values.decodeIfPresent(Date.self, forKey: .modified)
+        selected = try values.decodeIfPresent(Bool.self, forKey: .selected) ?? true
+        identity = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(path, forKey: .path)
+        try values.encode(sizeBytes, forKey: .sizeBytes)
+        try values.encodeIfPresent(modified, forKey: .modified)
+        try values.encode(selected, forKey: .selected)
+    }
 }
 
 struct ToolGroup: Codable {
@@ -27,38 +71,89 @@ struct CategoryScan: Codable {
 
 enum DirSizer {
 
-    static func size(of path: String) -> Int64 {
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: path, isDirectory: &isDir) else { return 0 }
-        if !isDir.boolValue { return fileSize(URL(fileURLWithPath: path)) }
+    enum Status: String, Codable, Sendable {
+        case complete
+        case partial
+        case unavailable
+        case cloudOrDataless
+        case symlink
+    }
 
-        let r = Shell.run("/usr/bin/du", ["-sk", path])
-        if r.status == 0 {
-            let field = r.out.prefix { $0.isNumber }
-            if let kb = Int64(field) {
-                let (bytes, overflow) = kb.multipliedReportingOverflow(by: 1024)
-                return overflow ? .max : bytes
+    struct Measurement: Codable, Sendable {
+        let bytes: Int64
+        let status: Status
+        let skippedEntries: Int
+    }
+
+    static func size(of path: String) -> Int64 {
+        measure(of: path).bytes
+    }
+
+    static func measure(of path: String) -> Measurement {
+        let fm = FileManager.default
+        if Safety.hasSymlinkComponent(path) {
+            return Measurement(bytes: 0, status: .symlink, skippedEntries: 1)
+        }
+        if Safety.isCloudOrDataless(path) {
+            return Measurement(bytes: 0, status: .cloudOrDataless, skippedEntries: 1)
+        }
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: path, isDirectory: &isDir) else {
+            return Measurement(bytes: 0, status: .unavailable, skippedEntries: 1)
+        }
+        if !isDir.boolValue {
+            guard let bytes = fileSize(URL(fileURLWithPath: path)) else {
+                return Measurement(bytes: 0, status: .unavailable, skippedEntries: 1)
             }
+            return Measurement(bytes: bytes, status: .complete, skippedEntries: 0)
         }
         return foundationSize(URL(fileURLWithPath: path))
     }
 
-    private static func foundationSize(_ url: URL) -> Int64 {
+    private static func foundationSize(_ url: URL) -> Measurement {
         var total: Int64 = 0
-        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
+        var skipped = 0
+        let keys: [URLResourceKey] = [
+            .totalFileAllocatedSizeKey,
+            .fileAllocatedSizeKey,
+            .fileSizeKey,
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey,
+        ]
         guard let en = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys,
-                                                       options: [], errorHandler: { _, _ in true }) else { return 0 }
-        for case let item as URL in en { total += fileSize(item) }
-        return total
+                                                       options: [], errorHandler: { _, _ in
+            skipped += 1
+            return true
+        }) else {
+            return Measurement(bytes: 0, status: .unavailable, skippedEntries: 1)
+        }
+        for case let item as URL in en {
+            let values = try? item.resourceValues(forKeys: Set(keys))
+            if values?.isSymbolicLink == true {
+                en.skipDescendants()
+                continue
+            }
+            if Safety.isCloudOrDataless(item.path) {
+                if values?.isDirectory == true { en.skipDescendants() }
+                skipped += 1
+                continue
+            }
+            guard values?.isRegularFile == true, let bytes = fileSize(item, values: values) else { continue }
+            let (next, overflow) = total.addingReportingOverflow(bytes)
+            total = overflow ? .max : next
+        }
+        return Measurement(bytes: total, status: skipped == 0 ? .complete : .partial, skippedEntries: skipped)
     }
 
-    private static func fileSize(_ url: URL) -> Int64 {
-        let vals = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey])
+    private static func fileSize(_ url: URL, values: URLResourceValues? = nil) -> Int64? {
+        let vals = values ?? (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]))
         if let a = vals?.totalFileAllocatedSize { return Int64(a) }
         if let a = vals?.fileAllocatedSize { return Int64(a) }
         if let a = vals?.fileSize { return Int64(a) }
-        return 0
+        return nil
     }
 
     static func modified(of path: String) -> Date? {

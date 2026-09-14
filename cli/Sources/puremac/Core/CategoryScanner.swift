@@ -15,17 +15,23 @@ enum CategoryScanner {
         var candidates: [(target: Int, path: String)] = []
         for (ti, target) in targets.enumerated() {
             let paths = target.contents
-                ? target.paths.filter { !Safety.isSymlink($0) }.flatMap(children(of:))
+                ? target.paths.filter {
+                    !Safety.hasSymlinkComponent($0)
+                        && !Safety.isCloudOrDataless($0)
+                        && !Safety.isPathIgnored($0, ignore: ignore)
+                }.flatMap(children(of:))
                 : target.paths
             for path in paths where passesPreFilter(path, ignore: ignore) {
                 candidates.append((ti, path))
             }
         }
-        let sizes = concurrentSizes(candidates.map { $0.path })
+        candidates = uniqueCandidates(candidates)
+        let measurements = concurrentMeasurements(candidates.map { $0.path })
 
         var itemsByTarget = [Int: [ScanItem]](minimumCapacity: targets.count)
-        for (i, c) in candidates.enumerated() where sizes[i] >= minSize {
-            let item = ScanItem(path: c.path, sizeBytes: sizes[i],
+        for (i, c) in candidates.enumerated()
+            where measurements[i].status == .complete && measurements[i].bytes >= minSize {
+            let item = ScanItem(path: c.path, sizeBytes: measurements[i].bytes,
                                 modified: DirSizer.modified(of: c.path),
                                 selected: targets[c.target].selectedByDefault)
             itemsByTarget[c.target, default: []].append(item)
@@ -44,23 +50,52 @@ enum CategoryScanner {
     private static func passesPreFilter(_ path: String, ignore: IgnoreStore) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else { return false }
-        if let type = (try? fm.attributesOfItem(atPath: path)[.type]) as? FileAttributeType, type == .typeSymbolicLink {
-            return false
-        }
-        if Safety.isProviderOwned(path) { return false }
-        if ignore.isIgnored(path) { return false }
+        if Safety.hasSymlinkComponent(path) { return false }
+        if Safety.isCloudOrDataless(path) { return false }
+        if Safety.ignoredPathProtectsCandidate(path, ignore: ignore) { return false }
         return true
     }
 
     static func concurrentSizes(_ paths: [String]) -> [Int64] {
+        concurrentMeasurements(paths).map(\.bytes)
+    }
+
+    static func concurrentMeasurements(_ paths: [String]) -> [DirSizer.Measurement] {
         guard !paths.isEmpty else { return [] }
-        var out = [Int64](repeating: 0, count: paths.count)
+        var out = [DirSizer.Measurement](
+            repeating: DirSizer.Measurement(bytes: 0, status: .unavailable, skippedEntries: 1),
+            count: paths.count
+        )
         out.withUnsafeMutableBufferPointer { buf in
             DispatchQueue.concurrentPerform(iterations: paths.count) { i in
-                buf[i] = DirSizer.size(of: paths[i])
+                buf[i] = DirSizer.measure(of: paths[i])
             }
         }
         return out
+    }
+
+    static func uniqueCandidates(_ candidates: [(target: Int, path: String)]) -> [(target: Int, path: String)] {
+        var seenPaths: Set<String> = []
+        var seenIdentities: Set<FileIdentity> = []
+        var accepted: [(target: Int, path: String, canonical: String)] = []
+        let ordered = candidates.enumerated().sorted {
+            if $0.element.path.count != $1.element.path.count {
+                return $0.element.path.count < $1.element.path.count
+            }
+            return $0.offset < $1.offset
+        }.map(\.element)
+        for candidate in ordered {
+            let canonical = URL(fileURLWithPath: candidate.path).resolvingSymlinksInPath().standardizedFileURL.path
+            guard !accepted.contains(where: {
+                canonical == $0.canonical || canonical.hasPrefix($0.canonical + "/")
+            }) else { continue }
+            guard seenPaths.insert(canonical).inserted else { continue }
+            if let identity = Safety.fileIdentity(at: canonical), !seenIdentities.insert(identity).inserted {
+                continue
+            }
+            accepted.append((candidate.target, candidate.path, canonical))
+        }
+        return accepted.map { ($0.target, $0.path) }
     }
 
     private static func scanTrash(ignore: IgnoreStore) -> [ToolGroup] {
@@ -72,12 +107,15 @@ enum CategoryScanner {
         }
 
         var groups: [ToolGroup] = []
-        for root in roots where !Safety.isSymlink(root) {
+        for root in roots where !Safety.hasSymlinkComponent(root) && !Safety.isCloudOrDataless(root) {
             guard let children = try? fm.contentsOfDirectory(atPath: root), !children.isEmpty else { continue }
             let paths = children.map { "\(root)/\($0)" }.filter { passesPreFilter($0, ignore: ignore) }
-            let sizes = concurrentSizes(paths)
-            let items = zip(paths, sizes).compactMap { (path, size) -> ScanItem? in
-                size >= minSize ? ScanItem(path: path, sizeBytes: size, modified: DirSizer.modified(of: path)) : nil
+            let unique = uniqueCandidates(paths.map { (target: 0, path: $0) })
+            let measurements = concurrentMeasurements(unique.map(\.path))
+            let items = zip(unique.map(\.path), measurements).compactMap { (path, measurement) -> ScanItem? in
+                measurement.status == .complete && measurement.bytes >= minSize
+                    ? ScanItem(path: path, sizeBytes: measurement.bytes, modified: DirSizer.modified(of: path))
+                    : nil
             }
             if !items.isEmpty {
                 let label = root.hasPrefix("/Volumes/")

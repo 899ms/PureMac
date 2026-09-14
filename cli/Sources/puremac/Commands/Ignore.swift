@@ -12,7 +12,7 @@ struct Ignore: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Add a path to the ignore list.")
         @Argument(help: "Path to protect.") var path: String
         func run() throws {
-            var store = IgnoreStore()
+            var store = try IgnoreStore(fileURL: AppPaths.ignoreFile)
             let added = try store.add(path)
             let shown = Render.shorten(((path as NSString).expandingTildeInPath as NSString).standardizingPath)
             print(added ? Term.green("✓ Protected ") + shown : Term.dim("Already protected: \(shown)"))
@@ -23,7 +23,7 @@ struct Ignore: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Remove a path from the ignore list.")
         @Argument(help: "Path to stop protecting.") var path: String
         func run() throws {
-            var store = IgnoreStore()
+            var store = try IgnoreStore(fileURL: AppPaths.ignoreFile)
             let removed = try store.remove(path)
             let shown = Render.shorten(((path as NSString).expandingTildeInPath as NSString).standardizingPath)
             print(removed ? Term.green("✓ Removed ") + shown : Term.yellow("Not in ignore list: \(shown)"))
@@ -33,7 +33,7 @@ struct Ignore: ParsableCommand {
     struct List: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Show protected paths.")
         func run() throws {
-            let store = IgnoreStore()
+            let store = try IgnoreStore(fileURL: AppPaths.ignoreFile)
             if store.roots.isEmpty {
                 print(Term.dim("No protected paths. Add one with `puremac ignore add <path>`."))
                 return

@@ -69,20 +69,21 @@ xcodebuild -project PureMac.xcodeproj -scheme PureMac -configuration Release \
 open build/Build/Products/Release/PureMac.app
 ```
 
-### Command line (beta)
+### Command line
 
-Prefer the terminal? `puremac` is an independent CLI companion with its own
-cleanup commands and safety checks. Some commands permanently remove selected
-files, so start with `--dry-run`, review every path, and then confirm deliberately.
+Open `puremac` for a keyboard-driven workspace. Select individual cache paths,
+review project artifacts, or browse your storage by size. Cleanup shows the exact
+selection and asks for confirmation before permanently removing it.
 
 ```bash
 brew install momenbasel/tap/puremac-cli
-puremac clean dev --dry-run
+puremac
 ```
 
-![puremac scanning and listing exactly what will be deleted before removing anything](cli/screenshots/clean.png)
+![PureMac CLI with individual selections and a running size total](cli/screenshots/clean.png)
 
-See [`cli/README.md`](cli/README.md) for the full command reference.
+Use `puremac clean dev --dry-run` for a preview or `--json` for scripts. See
+[`cli/README.md`](cli/README.md) for controls, commands, and cleanup boundaries.
 
 ## How it compares
 
