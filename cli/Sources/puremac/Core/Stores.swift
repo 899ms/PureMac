@@ -123,11 +123,9 @@ struct IgnoreStore {
             guard allowRelative else {
                 throw StoreError.invalidIgnorePath
             }
-            absolute = URL(fileURLWithPath: currentDirectoryPath, isDirectory: true)
-                .appendingPathComponent(expanded)
-                .path
+            absolute = currentDirectoryPath + "/" + expanded
         }
-        let standardized = URL(fileURLWithPath: absolute).standardizedFileURL.path
+        let standardized = try lexicalStandardizedAbsolutePath(absolute)
         guard standardized.hasPrefix("/"), standardized != "/",
               !standardized.unicodeScalars.contains(where: {
                   $0.value == 0 || CharacterSet.newlines.contains($0)
@@ -136,6 +134,22 @@ struct IgnoreStore {
             throw StoreError.invalidIgnorePath
         }
         return standardized
+    }
+
+    private static func lexicalStandardizedAbsolutePath(_ path: String) throws -> String {
+        guard path.hasPrefix("/") else {
+            throw StoreError.invalidIgnorePath
+        }
+        var components: [Substring] = []
+        for component in path.split(separator: "/") {
+            if component == "." { continue }
+            if component == ".." {
+                if !components.isEmpty { components.removeLast() }
+                continue
+            }
+            components.append(component)
+        }
+        return "/" + components.joined(separator: "/")
     }
 
     private static func load(from fileURL: URL) throws -> [String] {

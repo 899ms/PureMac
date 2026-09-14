@@ -126,10 +126,19 @@ final class OptimizeConfigTests: XCTestCase {
         }
         XCTAssertTrue(store.roots.isEmpty)
         var rootStore = try IgnoreStore(fileURL: file, currentDirectoryPath: "/")
-        XCTAssertThrowsError(try rootStore.add("."))
+        for path in [".", "/.", "/tmp/.."] {
+            XCTAssertThrowsError(try rootStore.add(path))
+            XCTAssertThrowsError(try rootStore.remove(path))
+        }
+        XCTAssertTrue(rootStore.roots.isEmpty)
+        XCTAssertTrue(try rootStore.add("/tmp/./puremac-ignore-fixture"))
+        XCTAssertEqual(rootStore.roots, ["/tmp/puremac-ignore-fixture"])
+        XCTAssertTrue(try rootStore.remove("/tmp/puremac-ignore-fixture"))
 
-        try Data("relative/path\n".utf8).write(to: file)
-        XCTAssertThrowsError(try IgnoreStore(fileURL: file))
+        for contents in ["relative/path\n", "/.\n", "/tmp/..\n"] {
+            try Data(contents.utf8).write(to: file)
+            XCTAssertThrowsError(try IgnoreStore(fileURL: file))
+        }
     }
 
     private func temporaryDirectory() throws -> URL {

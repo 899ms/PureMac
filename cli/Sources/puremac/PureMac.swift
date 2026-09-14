@@ -1,7 +1,7 @@
 import ArgumentParser
 import Foundation
 
-let puremacVersion = "1.1.0"
+let puremacVersion = "1.1.1"
 
 @main
 struct PureMac: ParsableCommand {
