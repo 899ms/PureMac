@@ -50,6 +50,7 @@ enum FileSizeCalculator {
 
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
+            if Task.isCancelled { break }
             guard let values = try? fileURL.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey, .isSymbolicLinkKey]) else { continue }
             // Skip symlinks so we don't double-count or follow links that
             // escape the directory. Only sum regular-file payload.

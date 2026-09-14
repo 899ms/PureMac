@@ -81,7 +81,7 @@ extension Notification.Name {
 @main
 struct PureMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState(performStartupTasks: NSClassFromString("XCTestCase") == nil)
     @StateObject private var theme = ThemeManager.shared
     @AppStorage("PureMac.OnboardingComplete") private var onboardingComplete = false
 
@@ -101,7 +101,7 @@ struct PureMacApp: App {
                 if onboardingComplete {
                     MainWindow()
                         .environmentObject(appState)
-                        .frame(minWidth: 900, minHeight: 600)
+                        .frame(minWidth: 960, minHeight: 640)
                 } else {
                     OnboardingView(isComplete: $onboardingComplete)
                 }
@@ -115,7 +115,7 @@ struct PureMacApp: App {
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 1000, height: 680)
+        .defaultSize(width: 1120, height: 740)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("Updates") {

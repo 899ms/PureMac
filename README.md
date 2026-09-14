@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="screenshots/smart-care.png" alt="PureMac Smart Care - one scan covering 12 cleanup checks, with free-space meter" width="820">
+  <img src="screenshots/smart-care.png" alt="PureMac Smart Care - storage overview and cleanup review" width="820">
 </p>
 
 <p align="center">
-  <img src="screenshots/scanning.png" alt="PureMac scanning - live progress with categories and sizes as they are found" width="820">
+  <img src="screenshots/smart-care-dark.png" alt="PureMac Smart Care in dark appearance" width="820">
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 
 <p align="center">
   <b>Reclaim your Mac.</b><br>
-  Free, open-source uninstaller and cleaner for macOS. No subscription, no telemetry, no upsell.
+  Free, open-source Mac care: cleanup, app management, storage exploration, and system checks. No subscription or telemetry.
 </p>
 
 <p align="center">
@@ -104,11 +104,11 @@ See [`cli/README.md`](cli/README.md) for the full command reference.
 
 A Mac cleaner asks for the deepest permission macOS grants - Full Disk Access - and then deletes your files. That demands a level of trust the category has spent twenty years burning. Here's the contract PureMac holds itself to, and you can verify every line of it in the source:
 
-- **Deletion behavior is explicit.** App-uninstaller flows attempt to move selected app files to the Trash. Dashboard/category cleanup, scheduled auto-clean, orphan removal, Trash emptying, Docker/Xcode runtime cleanup, administrator-authorized cleanup, and CLI cleanup can permanently delete data. Review selections carefully and use CLI dry runs.
+- **Deletion behavior is explicit.** App uninstalls, orphan removal, and exact-duplicate removal use the Trash at user level. Dashboard/category cleanup, scheduled auto-clean, Trash emptying, Docker/Xcode runtime cleanup, administrator-authorized removal, local snapshot deletion, and CLI cleanup can permanently delete data. Review selections carefully and use CLI dry runs.
 - **No telemetry, ever.** No analytics, no crash reporting, no "anonymous usage stats," no network calls to us. The app doesn't know you exist.
 - **No fake urgency.** No dramatized "47 GB of junk detected!" badge, no red alarm counters, no "your Mac is at risk." We show you neutral facts and let you decide.
 - **No overpromising.** We don't claim to "reclaim purgeable space," "boost RAM," or "speed up your Mac" - things no app can reliably do. See the purgeable-space note below.
-- **Reviewable selection.** Dashboard/category cleanup and single-file app removal prompt before acting. Bulk app-file and orphan removal act on the explicit selection without another prompt. Scheduled auto-clean is unattended once enabled, and tool-backed rows such as Docker cleanup may not have a revealable path.
+- **Reviewable selection.** Manual cleanup, app-file removal, orphan removal, duplicate removal, and local snapshot deletion require confirmation. Cleanup filters show when selected items are hidden; select-visible controls affect only the rows on screen. Scheduled auto-clean remains unattended once enabled.
 - **Auditable.** It's MIT. The exact code that decides what gets removed is in [`PureMac/Services`](PureMac/Services) and [`PureMac/Logic/Scanning`](PureMac/Logic/Scanning). Read it. Fork it. Ship your own.
 
 If PureMac ever adds telemetry, a paywall on core features, or a fear-based scan, it will have become the thing it was built to replace. Hold us to this.
@@ -128,13 +128,13 @@ Most Mac cleaners are subscription apps that hide their disk usage behind a payw
 ## What it does
 
 ### App Uninstaller
-Discovers everything in `/Applications` and `~/Applications`, then uses a 10-level matching engine (bundle ID, team identifier, entitlements, Spotlight metadata, container discovery, company-name heuristics, partial path matches) to find every file the app dropped on your disk. Three sensitivity tiers - Strict, Enhanced, Deep - let you choose how aggressive that match is. Apple system apps are excluded from the uninstall list automatically. You can also right-click any app in Finder and choose **Services → Uninstall with PureMac** to jump straight into its related-files scan.
+Discovers everything in `/Applications` and `~/Applications`, then uses a 10-level matching engine (bundle ID, team identifier, entitlements, Spotlight metadata, container discovery, company-name heuristics, partial path matches) to find related files on your disk. Matching is heuristic, so review the results before removal. Three sensitivity tiers - Strict, Enhanced, Deep - let you choose how aggressive that match is. Apple system apps are excluded from the uninstall list automatically. You can also right-click any app in Finder and choose **Services → Uninstall with PureMac** to jump straight into its related-files scan.
 
 ### Orphan Finder
 Walks `~/Library` and surfaces files left behind by apps that no longer exist on disk. The matcher compares against bundle identifiers and normalized names of every installed app, so a leftover `~/Library/Containers/com.foo.bar` from an app you deleted in 2022 shows up clearly.
 
 ### System Cleaner
-Smart Scan runs every category in parallel. Each category is its own deliberate scanner:
+Smart Scan checks each category in sequence and reports progress as files are found. You can stop a scan and keep the categories already completed:
 
 - **System Junk** - system caches, logs, temp files
 - **User Cache** - dynamically discovered, no hardcoded app list
@@ -143,24 +143,44 @@ Smart Scan runs every category in parallel. Each category is its own deliberate 
 - **Trash Bins** - empties all bins, including external volumes
 - **Large & Old Files** - >100 MB or older than 1 year (never auto-selected)
 - **Xcode Junk** - DerivedData, Archives, simulator caches, and downloaded simulator runtimes (deleted via `simctl runtime delete`; never auto-selected)
-- **Brew Cache** - respects custom `HOMEBREW_CACHE`
+- **Brew Cache** - Homebrew download caches within approved cache locations
 - **Node Cache** - npm, yarn classic, pnpm content-addressable store
 - **Docker Cache** - images, containers, build cache
 
 > **On "purgeable space":** PureMac shows your APFS purgeable space in the storage breakdown for transparency, but it deliberately does **not** list it as junk to delete. Purgeable space is reserved and reclaimed by macOS itself - no third-party app can reliably free it, and even the Finder's purgeable figure is known to be inaccurate. Cleaners that claim to "reclaim purgeable space" are overpromising. We'd rather be honest than impressive.
+
+### Storage and file review
+
+**Space Explorer** measures the allocated space inside a folder you choose. Drill into directories, compare their sizes, and reveal an item in Finder. Packages are measured without exposing their contents as navigable folders. Skipped and inaccessible items are reported.
+
+**Duplicate Finder** groups files with matching sizes and SHA-256 content hashes. Hard links are not counted as separate recoverable copies. Every group keeps one protected copy; selected extras move to the Trash only after confirmation and a fresh identity/content check. Emptying the Trash is a separate step.
+
+**Similar Photos** compares image thumbnails using perceptual hashes, color, and aspect ratio. Review likely matches side by side and reveal them in Finder. Similarity is an estimate, so this tool does not remove photos. Each scan checks up to 500 images and 10,000 directory entries, with a visible notice when a limit is reached. Photo libraries, app packages, symbolic links, and cloud-only files are skipped.
+
+Cleanup results support name/path search, size and age filters, sorting, and selection of visible rows. Right-click a cleanup result to always exclude its path. Exclusions also protect containing folders from cleanup and apply to scheduled runs; manage them in Settings.
+
+### Protection and performance
+
+**Protection** checks Gatekeeper, FileVault, the application firewall, System Integrity Protection, and installed XProtect metadata. A failed or unavailable check stays unknown. It also provides shortcuts to privacy and permission settings. This is a configuration audit, not an antivirus or malware scanner.
+
+**Performance** shows CPU and memory information, lists third-party launch-agent/daemon definitions, and lists local snapshots. A launch definition is not proof that a process is running. You can open Login Items or Activity Monitor and delete a specific Time Machine local snapshot after confirmation. Snapshot sizes are not estimated, and system update snapshots cannot be removed here.
+
+### App updates
+
+Check for updates to Homebrew-managed cask apps and choose which ones to upgrade. PureMac runs Homebrew with analytics disabled and shows command failures. These actions use the network and Homebrew's package sources. Apps installed outside Homebrew are not covered; an App Store shortcut is provided for those managed by Apple.
 
 ### Scheduled Cleaning
 Optional. Configurable interval (hourly to monthly), with auto-clean threshold so background runs only fire when there's something meaningful to remove.
 
 ## Permissions
 
-PureMac needs **Full Disk Access** to read the locations macOS hides from every app by default - Mail downloads, Safari data, the TCC database, protected app containers. Without it, the cleanup categories miss roughly 70% of what they could find and app uninstalls leave behind everything in `~/Library/Containers`.
+PureMac needs **Full Disk Access** to read the locations macOS hides from every app by default - Mail downloads, Safari data, the TCC database, protected app containers. Without it, some cleanup categories and app-container scans will be incomplete. The locations available depend on your macOS version and permissions.
 
 The first-launch onboarding walks you through granting it with an animated preview of the exact toggle you need to flip. If you skip it, the dashboard surfaces a single-click "Set up" pill. If a cleanup fails because of a permission issue, PureMac opens System Settings, reveals its bundle in Finder so you can drag it into the FDA list, polls the permission state every second, and auto-retries the failed batch the moment you grant access. You never have to re-select anything.
 
 What PureMac does *not* do:
 - It does not collect telemetry, crash reports, or usage analytics.
-- It does not require a network connection to operate.
+- Local scans and cleanup work offline. Checking for or installing Homebrew app updates requires a network connection.
 - It does not upload or transmit scanned paths or deleted data.
 
 ## Troubleshooting
@@ -179,21 +199,23 @@ Give it a minute to re-seed, then open PureMac once. If it still sticks, a resta
 
 ## Screenshots
 
-| Smart Care | Live scan |
+| Smart Care | Dark appearance |
 |---|---|
-| ![Smart Care](screenshots/smart-care.png) | ![Live scan](screenshots/scanning.png) |
+| ![Smart Care](screenshots/smart-care.png) | ![Dark appearance](screenshots/smart-care-dark.png) |
 
-| Scan breakdown | App Uninstaller |
+| Space Explorer | Duplicate Finder |
 |---|---|
-| ![Scan breakdown](screenshots/breakdown.png) | ![App Uninstaller](screenshots/app-uninstaller.png) |
+| ![Space Explorer](screenshots/space-explorer.png) | ![Duplicate Finder](screenshots/duplicate-finder.png) |
 
-| System Junk | Xcode Junk |
+| Protection | App Updates |
 |---|---|
-| ![System Junk](screenshots/system-junk.png) | ![Xcode Junk](screenshots/xcode-junk.png) |
+| ![Protection](screenshots/protection.png) | ![App Updates](screenshots/app-updates.png) |
 
-| User Cache | Onboarding |
-|---|---|
-| ![User Cache](screenshots/user-cache.png) | ![Onboarding](screenshots/onboarding.png) |
+<p align="center">
+  <img src="screenshots/similar-photos.png" alt="Similar Photos comparing sample images for manual review" width="820">
+</p>
+
+Screenshots show the running macOS app. File tools use sample files and images.
 
 ## Architecture
 
@@ -202,12 +224,13 @@ PureMac/
   Logic/Scanning/     - Heuristic scan engine, locations database, conditions
   Logic/Utilities/    - Structured logging
   Models/             - Data models, typed errors
-  Services/           - Scan engine, cleaning engine, permission coordinator, scheduler
+  Services/           - Scanning, cleanup, file tools, protection, updates, scheduler
   ViewModels/         - Centralized app state
   Views/              - Native SwiftUI views
     Apps/             - App uninstaller views
     Components/       - Shared components (FDA demo, permission sheet, theme)
     Orphans/          - Orphan finder
+    Tools/            - Space, duplicates, similar photos, protection, performance, updates
     Settings/         - Native Form-based settings
 ```
 
@@ -225,7 +248,7 @@ Key components:
 - Core-cleaner allow-list: `CleaningEngine` refuses a user-level path outside its explicit safe roots. App-uninstaller and orphan flows use their own policies.
 - Admin escalation is gated by its own explicit allow-list; root-owned items outside those permitted roots are refused.
 - System app protection: Apple's bundles cannot be uninstalled, regardless of selection.
-- Confirmation varies by workflow: dashboard/category cleanup and single-file app removal prompt; bulk app-file and orphan removal act on the explicit selection without another prompt; scheduled auto-clean is unattended after enablement.
+- Manual destructive workflows require confirmation. Exact duplicates retain one protected copy and recheck files before moving extras to the Trash. Scheduled auto-clean remains unattended after enablement.
 
 If you find a vulnerability, please open a private security advisory rather than a public issue.
 

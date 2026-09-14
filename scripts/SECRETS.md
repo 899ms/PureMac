@@ -8,7 +8,7 @@ The pipeline uses an **App Store Connect API key** for notarization (modern,
 no rotation, scoped to one team) instead of the legacy
 `APPLE_ID + app-specific-password` flow.
 
-## Required secrets (6)
+## Required secrets (7)
 
 | Secret | Source | Notes |
 |--------|--------|-------|
@@ -19,11 +19,13 @@ no rotation, scoped to one team) instead of the legacy
 | `APP_STORE_CONNECT_ISSUER_ID` | UUID from <https://appstoreconnect.apple.com/access/integrations/api> | e.g. `5de3898a-cd31-4061-850f-ae17b389e46a` |
 | `APP_STORE_CONNECT_PRIVATE_KEY` | Full contents of the `.p8` file (`-----BEGIN PRIVATE KEY-----` ... `-----END PRIVATE KEY-----`) | Paste raw, including the BEGIN/END lines |
 
-## Optional secret (1)
+## Homebrew tap access
 
 | Secret | Source | Notes |
 |--------|--------|-------|
-| `HOMEBREW_TAP_TOKEN` | Fine-grained PAT with `Contents: read+write` on `momenbasel/homebrew-tap` | Without this the tap formula bump step is skipped (in-repo `homebrew/puremac.rb` still bumps via the default `GITHUB_TOKEN`) |
+| `HOMEBREW_TAP_DEPLOY_KEY` | SSH private key for a write-enabled deploy key on `momenbasel/homebrew-tap` | Required by release preflight and the external tap update. The in-repo cask uses `GITHUB_TOKEN`. |
+
+The official `Homebrew/homebrew-cask` entry is updated separately through a cask bump pull request after the release is published.
 
 ## Extracting your Developer ID cert as a filtered `.p12`
 
@@ -97,8 +99,8 @@ gh secret set APP_STORE_CONNECT_KEY_ID       --repo momenbasel/PureMac --body "5
 gh secret set APP_STORE_CONNECT_ISSUER_ID    --repo momenbasel/PureMac --body "5de3898a-cd31-4061-850f-ae17b389e46a"
 gh secret set APP_STORE_CONNECT_PRIVATE_KEY  --repo momenbasel/PureMac < ~/.appstoreconnect/private_keys/AuthKey_5G7R52L8RK.p8
 
-# Optional:
-gh secret set HOMEBREW_TAP_TOKEN             --repo momenbasel/PureMac --body "<your fine-grained PAT>"
+# Required tap deploy key:
+gh secret set HOMEBREW_TAP_DEPLOY_KEY        --repo momenbasel/PureMac < /path/to/tap-deploy-key
 
 # Verify:
 gh secret list --repo momenbasel/PureMac
@@ -117,15 +119,15 @@ rm -P ~/Desktop/PureMac-secrets/PureMac-DeveloperID.p12* \
 Dry run first (build + sign + notarize, no upload, no homebrew bump):
 
 ```bash
-gh workflow run release.yml --repo momenbasel/PureMac -f version=2.2.0 -f dry_run=true
+gh workflow run release.yml --repo momenbasel/PureMac -f version=3.0.0 -f dry_run=true
 gh run watch --repo momenbasel/PureMac
 ```
 
 Real release (after dry run is green):
 
 ```bash
-git tag v2.2.0
-git push origin v2.2.0
+git tag v3.0.0
+git push origin v3.0.0
 ```
 
 ## What ships

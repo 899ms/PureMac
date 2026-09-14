@@ -2,353 +2,264 @@ import SwiftUI
 
 struct CategoryDetailView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let category: CleaningCategory
 
-    @State private var sortDescending: Bool = true
-    @State private var searchText = ""
+    @State private var filter = CleanupReviewFilter()
     @State private var showConfirmation = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pendingItems: [CleanableItem] = []
 
-    private var result: CategoryResult? {
-        appState.categoryResults[category]
-    }
+    private var result: CategoryResult? { appState.categoryResults[category] }
+    private var visibleItems: [CleanableItem] { filter.apply(to: result?.items ?? []) }
+    private var selectedItems: [CleanableItem] { (result?.items ?? []).filter(appState.isItemSelected) }
+    private var selectedSize: Int64 { selectedItems.reduce(0) { $0 + $1.size } }
 
     var body: some View {
         VStack(spacing: 0) {
-            heroCard
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 12)
-
-            Group {
-                if let result = result {
-                    if result.items.isEmpty {
-                        EmptyStateView("All Clean", systemImage: "checkmark.circle", description: "No junk files found in this category.", tint: Tint.green)
-                    } else {
-                        VStack(spacing: 0) {
-                            selectionStrip(result)
-                                .padding(.horizontal, 20)
-                                .padding(.bottom, 10)
-                            fileList(result)
-                        }
-                    }
-                } else {
-                    EmptyStateView("Not Scanned", systemImage: category.icon, description: "Run a scan to analyze this category.", action: { appState.scanSingleCategory(category) }, actionLabel: "Scan Now", tint: category.color)
-                }
-            }
-        }
-        .searchable(text: $searchText, prompt: "Filter files")
-        .navigationTitle(Text(LocalizedStringKey(category.rawValue)))
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    appState.scanSingleCategory(category)
-                } label: {
-                    Label("Scan", systemImage: "arrow.clockwise")
-                }
-                .disabled(appState.scanState.isActive)
-            }
-
-            ToolbarItem(placement: .automatic) {
-                if let result = result, !result.items.isEmpty {
-                    Button(action: { sortDescending.toggle() }) {
-                        Label {
-                            Text(LocalizedStringKey(sortDescending ? "Largest First" : "Smallest First"))
-                        } icon: {
-                            Image(systemName: "arrow.up.arrow.down")
-                        }
-                    }
-                    .help(LocalizedStringKey(sortDescending ? "Sorted: Largest First" : "Sorted: Smallest First"))
-                }
-            }
-        }
-        .confirmationDialog(cleanConfirmationTitle, isPresented: $showConfirmation, titleVisibility: .visible) {
-            Button("Clean", role: .destructive) {
-                appState.cleanCategory(category)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will permanently delete the selected files. This cannot be undone.")
-        }
-    }
-
-    private func cleanItemsLabel(count: Int) -> String {
-        String(format: String(localized: "Clean %lld items"), Int64(count))
-    }
-
-    private var cleanConfirmationTitle: String {
-        String(
-            format: String(localized: "Clean %@?"),
-            ByteCountFormatter.string(fromByteCount: appState.selectedSizeInCategory(category), countStyle: .file)
-        )
-    }
-
-    // MARK: - Hero
-
-    private var heroCard: some View {
-        let totalSize = result?.totalSize ?? 0
-        let itemCount = result?.itemCount ?? 0
-        let isScanning = appState.scanState.isActive
-
-        return CardSurface(padding: 20, tint: category.color) {
-            HStack(alignment: .center, spacing: 16) {
-                IconTile(systemName: category.icon, tint: category.color, size: 60, corner: 16, vivid: true)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(LocalizedStringKey(category.rawValue))
-                        .font(.system(size: 22, weight: .bold))
-                    Text(LocalizedStringKey(category.description))
-                        .font(.system(size: 12.5))
+            header
+            if case .scanning = appState.scanState {
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning \(appState.currentScanCategory)…")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                    if itemCount > 0 {
-                        Text(itemsAndSizeText(itemCount: itemCount, totalSize: totalSize))
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .monospacedDigit()
-                            .contentTransition(reduceMotion ? .identity : .numericText())
-                            .foregroundStyle(category.color)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill(category.color.opacity(0.12)))
-                            .padding(.top, 4)
-                            .animation(reduceMotion ? nil : MotionTokens.gentle, value: totalSize)
-                    }
+                    Spacer()
+                    Button("Stop scan") { appState.cancelScan() }
                 }
-
-                Spacer()
-
-                Button {
-                    appState.scanSingleCategory(category)
-                } label: {
-                    Label {
-                        Text(scanButtonLabel(isScanning: isScanning, hasResult: result != nil))
-                    } icon: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .font(.system(size: 12.5, weight: .semibold))
-                }
-                .buttonStyle(.bordered)
-                .tint(category.color)
-                .controlSize(.large)
-                .disabled(isScanning)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 16)
             }
+            if let result, !result.items.isEmpty {
+                filters
+                Divider()
+                if visibleItems.isEmpty {
+                    EmptyStateView("No matching files", systemImage: "line.3.horizontal.decrease.circle", description: "Try another name, size, or date range.", action: { filter = CleanupReviewFilter() }, actionLabel: "Clear filters", tint: Tint.teal)
+                } else {
+                    List(visibleItems) { item in
+                        CleanupFileRow(item: item)
+                            .listRowSeparator(.visible)
+                    }
+                    .listStyle(.inset)
+                    .disabled(appState.scanState.isActive)
+                }
+                selectionBar
+            } else if result != nil {
+                EmptyStateView("No files found", systemImage: "checkmark.circle", description: appState.hasFullDiskAccess ? "There are no cleanup items in this category." : "Some protected locations are unavailable. Full Disk Access allows a more complete scan.", tint: Tint.teal)
+            } else if !appState.scanState.isActive {
+                EmptyStateView("See what is taking up space", systemImage: category.icon, description: "Scan first, then review the exact files before removing anything.", action: { appState.scanSingleCategory(category) }, actionLabel: "Scan this category", tint: Tint.teal)
+            } else {
+                Spacer()
+            }
+        }
+        .navigationTitle(Text(LocalizedStringKey(category.rawValue)))
+        .confirmationDialog("Remove selected files?", isPresented: $showConfirmation, titleVisibility: .visible) {
+            Button("Permanently remove \(pendingItems.count) items", role: .destructive) {
+                appState.cleanCategory(category, itemIDs: Set(pendingItems.map(\.id)))
+                pendingItems = []
+            }
+            Button("Cancel", role: .cancel) { pendingItems = [] }
+        } message: {
+            Text(confirmationMessage)
+        }
+        .onChange(of: category) { _ in
+            filter = CleanupReviewFilter()
+            pendingItems = []
+            showConfirmation = false
         }
     }
 
-    /// Persistent action strip above the file list: tri-state select-all,
-    /// live selection count, selected size, and the Clean CTA. Previously
-    /// these lived only in the toolbar, one extra glance away from the rows
-    /// they act on.
-    private func selectionStrip(_ result: CategoryResult) -> some View {
-        let selectedCount = appState.selectedCountInCategory(category)
-        let totalCount = result.itemCount
-        let selectedSize = appState.selectedSizeInCategory(category)
-
-        return CardSurface(padding: 10, elevation: .flat) {
-            HStack(spacing: 12) {
-                Toggle(isOn: Binding(
-                    get: { selectedCount == totalCount && totalCount > 0 },
-                    set: { newValue in
-                        if newValue {
-                            appState.selectAllInCategory(category)
-                        } else {
-                            appState.deselectAllInCategory(category)
-                        }
-                    }
-                )) {
-                    Text(
-                        String(
-                            format: String(localized: "%lld of %lld selected"),
-                            Int64(selectedCount),
-                            Int64(totalCount)
-                        )
-                    )
-                    .font(.system(size: 12, weight: .medium))
-                    .monospacedDigit()
-                    .contentTransition(reduceMotion ? .identity : .numericText())
+    private var header: some View {
+        HStack(alignment: .top, spacing: 16) {
+            IconTile(systemName: category.icon, tint: Tint.teal, size: 48, corner: 12)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(LocalizedStringKey(category.rawValue))
+                    .font(.system(size: 26, weight: .semibold))
+                Text(LocalizedStringKey(category.description))
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                if let result {
+                    Text("\(result.itemCount) items · \(result.formattedSize) found")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
-                .toggleStyle(AnimatedCheckboxStyle(tint: category.color))
-                .animation(reduceMotion ? nil : MotionTokens.gentle, value: selectedCount)
+            }
+            Spacer(minLength: 16)
+            Button {
+                appState.scanSingleCategory(category)
+            } label: {
+                Label(result == nil ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(appState.scanState.isActive)
+        }
+        .padding(28)
+    }
 
+    private var filters: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Find a file or path", text: $filter.query)
+                    .textFieldStyle(.plain)
+                    .accessibilityLabel("Filter cleanup files")
+                if !filter.query.isEmpty {
+                    Button { filter.query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Clear search")
+                        .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(10)
+            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            HStack(spacing: 12) {
+                Picker("Size", selection: $filter.size) {
+                    ForEach(CleanupSizeFilter.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .frame(maxWidth: 180)
+                Picker("Modified", selection: $filter.age) {
+                    ForEach(CleanupAgeFilter.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .frame(maxWidth: 210)
+                Spacer(minLength: 0)
+                Picker("Sort", selection: $filter.order) {
+                    ForEach(CleanupSortOrder.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .frame(maxWidth: 185)
+            }
+            .controlSize(.small)
+            HStack {
+                Text("\(visibleItems.count) of \(result?.itemCount ?? 0) items shown")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
+                Button(visibleItems.allSatisfy(appState.isItemSelected) ? "Deselect visible" : "Select visible") {
+                    appState.setSelection(!visibleItems.allSatisfy(appState.isItemSelected), for: visibleItems)
+                }
+                .disabled(visibleItems.isEmpty || appState.scanState.isActive)
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.bottom, 14)
+    }
 
-                Text(ByteCountFormatter.string(fromByteCount: selectedSize, countStyle: .file))
+    private var selectionBar: some View {
+        let visibleIDs = Set(visibleItems.map(\.id))
+        let hiddenCount = selectedItems.filter { !visibleIDs.contains($0.id) }.count
+        return HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(selectedItems.count) selected · \(ByteCountFormatter.string(fromByteCount: selectedSize, countStyle: .file))")
                     .font(.system(size: 13, weight: .semibold))
                     .monospacedDigit()
+                Text(hiddenCount > 0 ? "Includes \(hiddenCount) selected items hidden by filters." : "Selected cleanup items are permanently removed.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-
-                if selectedSize > 0 {
-                    Button {
-                        showConfirmation = true
-                    } label: {
-                        Label {
-                            Text(cleanItemsLabel(count: selectedCount))
-                        } icon: {
-                            Image(systemName: "trash")
-                        }
-                    }
-                    .buttonStyle(GlowProminentButtonStyle(tint: Tint.red, gradient: TintGradient.destructive))
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.92)))
-                }
             }
-            .animation(reduceMotion ? nil : MotionTokens.snappy, value: selectedSize > 0)
-        }
-    }
-
-    private func itemsAndSizeText(itemCount: Int, totalSize: Int64) -> String {
-        String(
-            format: String(localized: "%lld items · %@"),
-            Int64(itemCount),
-            ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)
-        )
-    }
-
-    private func scanButtonLabel(isScanning: Bool, hasResult: Bool) -> LocalizedStringKey {
-        if isScanning { return "Scanning…" }
-        if hasResult { return "Rescan" }
-        return "Scan"
-    }
-
-    // MARK: - File List
-
-    private func fileList(_ result: CategoryResult) -> some View {
-        let items = sortedItems(result.items).filter { item in
-            searchText.isEmpty || item.name.localizedCaseInsensitiveContains(searchText) || item.path.localizedCaseInsensitiveContains(searchText)
-        }
-        return List {
-            // No .staggered() here: List is lazy, so a delayed-reveal
-            // modifier would blank each row for ~0.45s as it scrolls into
-            // view on large scans. The row hover/selection polish carries
-            // the motion; the list-level sort/filter animation handles
-            // reorders.
-            ForEach(Array(items.enumerated()), id: \.element.id) { _, item in
-                FileRowView(item: item)
+            Spacer(minLength: 8)
+            if !selectedItems.isEmpty {
+                Button("Clear selection") { appState.deselectAllInCategory(category) }
+                    .buttonStyle(.borderless)
+                    .disabled(appState.scanState.isActive)
             }
+            Button {
+                pendingItems = selectedItems
+                showConfirmation = true
+            } label: {
+                Label("Review removal", systemImage: "trash")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Tint.teal)
+            .controlSize(.large)
+            .disabled(selectedItems.isEmpty || appState.scanState.isActive)
         }
-        // CleanableItem ids are stable, so SwiftUI move-animates re-sorts and
-        // fades filtered rows instead of snapping.
-        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: sortDescending)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: searchText)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 18)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
     }
 
-    private func sortedItems(_ items: [CleanableItem]) -> [CleanableItem] {
-        items.sorted { sortDescending ? $0.size > $1.size : $0.size < $1.size }
+    private var confirmationMessage: String {
+        let size = ByteCountFormatter.string(fromByteCount: pendingItems.reduce(0) { $0 + $1.size }, countStyle: .file)
+        let names = pendingItems.prefix(5).map(\.name).joined(separator: "\n")
+        let more = pendingItems.count > 5 ? "\nAnd \(pendingItems.count - 5) more." : ""
+        return "\(size) selected. This permanently removes the selected files or runs the listed cleanup actions. It cannot be undone.\n\n\(names)\(more)"
     }
 }
 
-// MARK: - File Row View
-
-private struct FileRowView: View {
+private struct CleanupFileRow: View {
     @EnvironmentObject var appState: AppState
     let item: CleanableItem
 
-    @State private var hovering = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var isSelected: Bool {
-        appState.isItemSelected(item)
-    }
-
     var body: some View {
-        Toggle(isOn: Binding(
-            get: { isSelected },
-            set: { _ in appState.toggleItem(item) }
-        )) {
-            HStack {
-                Image(systemName: fileIcon)
-                    .foregroundStyle(item.category.color.opacity(0.85))
-                    .frame(width: 20)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-
-                    if !item.isActionItem {
-                        Text(item.path)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } else if item.simctlRuntimeIdentifier != nil {
-                        Text(String(localized: "Simulator runtime"))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer()
-
-                // Hover-revealed Finder shortcut; stays in the layout so the
-                // trailing size never shifts sideways.
-                if !item.isActionItem {
-                    Button {
-                        NSWorkspace.shared.selectFile(item.path, inFileViewerRootedAtPath: "")
-                    } label: {
-                        Image(systemName: "folder")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
+        HStack(spacing: 12) {
+            Toggle("Select \(item.name)", isOn: appState.itemBinding(for: item))
+                .labelsHidden()
+                .toggleStyle(.checkbox)
+                .tint(Tint.teal)
+                .accessibilityLabel("Select \(item.name)")
+            Image(systemName: item.isActionItem ? "gearshape.2" : "doc")
+                .font(.system(size: 18))
+                .foregroundStyle(.secondary)
+                .frame(width: 25)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(item.isActionItem ? "Managed cleanup action" : (item.path as NSString).abbreviatingWithTildeInPath)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(item.path)
+            }
+            Spacer(minLength: 12)
+            if !item.isSelected {
+                Text("Review")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.05), in: Capsule())
+                    .help("Personal data or an optional cleanup action. Left unselected by default.")
+            }
+            if let date = item.lastModified {
+                Text(date, style: .date)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 78, alignment: .trailing)
+            }
+            Text(item.formattedSize)
+                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                .frame(width: 85, alignment: .trailing)
+            if !item.isActionItem {
+                Button { reveal() } label: { Image(systemName: "arrow.up.forward.square") }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
                     .help("Reveal in Finder")
-                    .opacity(hovering ? 1 : 0)
-                    .scaleEffect(reduceMotion ? 1 : (hovering ? 1 : 0.8))
-                    .allowsHitTesting(hovering)
-                }
-
-                if let date = item.lastModified {
-                    Text(date, style: .date)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Text(item.formattedSize)
-                    .font(.callout)
-                    .fontWeight(.medium)
-                    .monospacedDigit()
-                    .frame(width: 80, alignment: .trailing)
+                    .accessibilityLabel("Reveal \(item.name) in Finder")
             }
         }
-        .toggleStyle(AnimatedCheckboxStyle(tint: item.category.color))
-        .padding(.vertical, 2)
-        .padding(.horizontal, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(
-                    hovering
-                        ? Color.primary.opacity(0.06)
-                        : (isSelected ? item.category.color.opacity(0.04) : .clear)
-                )
-        )
-        .animation(reduceMotion ? nil : MotionTokens.snappy, value: hovering)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isSelected)
-        .onHover { hovering = $0 }
+        .padding(.vertical, 9)
         .contextMenu {
             if !item.isActionItem {
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.selectFile(item.path, inFileViewerRootedAtPath: "")
+                Button("Reveal in Finder") { reveal() }
+                Button("Copy path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(item.path, forType: .string)
                 }
+                Divider()
+                Button("Always exclude from cleanup") { appState.excludeFromCleanup(item) }
+                    .disabled(appState.scanState.isActive)
             }
         }
     }
 
-    private var fileIcon: String {
-        if item.simctlRuntimeIdentifier != nil {
-            return "iphone"
-        }
-        let ext = (item.name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "log", "txt": return "doc.text"
-        case "zip", "gz", "tar": return "doc.zipper"
-        case "dmg", "iso": return "opticaldisc"
-        case "app": return "app"
-        case "pkg": return "shippingbox"
-        default:
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
-                return "folder"
-            }
-            return "doc"
-        }
+    private func reveal() {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.path)])
     }
 }

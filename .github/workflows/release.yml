@@ -149,6 +149,16 @@ jobs:
           # Verify identity loaded
           security find-identity -v -p codesigning "${KEYCHAIN_PATH}" | grep "Developer ID Application: Moamen Basel"
 
+      - name: Run tests before signing
+        run: |
+          set -euo pipefail
+          xcodebuild -project "${PROJECT}" \
+            -scheme "${SCHEME}" \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath build-tests \
+            CODE_SIGNING_ALLOWED=NO test | xcbeautify
+
       - name: Archive (universal arm64 + x86_64)
         run: |
           set -euo pipefail
@@ -321,7 +331,16 @@ jobs:
               echo ""
               echo "Universal binary (Intel + Apple Silicon). Signed with Developer ID + notarized + stapled by Apple."
               echo ""
-              if [[ "${VERSION}" == "2.9.8" ]]; then
+              if [[ "${VERSION}" == "3.0.0" ]]; then
+                echo "### What changed"
+                echo "- Redesigned dashboard and navigation, with clearer storage and cleanup review."
+                echo "- New Space Explorer, exact Duplicate Finder, and Similar Photos review."
+                echo "- Protection checks, startup and snapshot inspection, and Homebrew app updates."
+                echo "- Cleanup filters, persistent exclusions, stop-scan support, and safer removal confirmations."
+                echo ""
+                echo "Protection checks inspect macOS settings; they are not a malware scanner. App updates cover Homebrew casks. Similar Photos groups images for manual review."
+                echo ""
+              elif [[ "${VERSION}" == "2.9.8" ]]; then
                 echo "### What changed"
                 echo ""
                 echo "- Fixed switching Appearance from Dark back to System so the entire window updates immediately (#152)."
@@ -341,8 +360,7 @@ jobs:
               echo "### Install"
               echo ""
               echo "\`\`\`"
-              echo "brew tap momenbasel/tap"
-              echo "brew install --cask puremac"
+              echo "brew install --cask momenbasel/tap/puremac"
               echo "\`\`\`"
             } > "${NOTES_FILE}"
           }

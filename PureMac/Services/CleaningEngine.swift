@@ -26,10 +26,15 @@ actor CleaningEngine {
     func cleanItems(_ items: [CleanableItem], progressHandler: @Sendable (Double) -> Void) async -> CleaningResult {
         var result = CleaningResult()
         let total = items.count
+        let exclusions = CleanupExclusions.paths()
 
         for (index, item) in items.enumerated() {
             let progress = Double(index + 1) / Double(total)
-            progressHandler(progress)
+            defer { progressHandler(progress) }
+            if CleanupExclusions.excludes(item.path, paths: exclusions) {
+                result.errors.append("Excluded from cleanup: \(item.name)")
+                continue
+            }
 
             if item.category == .purgeableSpace {
                 let purged = await purgePurgeableSpace()
@@ -109,12 +114,16 @@ actor CleaningEngine {
 
             do {
                 let itemURL = URL(fileURLWithPath: item.path)
-                guard fileManager.fileExists(atPath: item.path) else { continue }
-
-                // Security: resolve symlinks, validate the real path, delete
-                // through the resolved URL. Deleting through the unresolved
-                // path lets an attacker-at-same-UID swap a component to a
-                // symlink after the check and have us follow it.
+                guard !hasUnexpectedSymlink(in: item.path) else {
+                    let msg = "Skipped symlink or unsafe path: \(item.path)"
+                    Logger.shared.log(msg, level: .warning)
+                    result.errors.append(msg)
+                    continue
+                }
+                guard fileManager.fileExists(atPath: item.path) else {
+                    result.cleanedPaths.insert(item.path)
+                    continue
+                }
                 let resolvedURL = itemURL.resolvingSymlinksInPath()
                 let resolved = resolvedURL.path
 
@@ -139,15 +148,15 @@ actor CleaningEngine {
                 // Narrow the TOCTOU window: re-resolve right before the delete
                 // and require the resolved path to still match. Any concurrent
                 // swap between check and delete aborts the operation.
-                let reResolved = URL(fileURLWithPath: item.path).resolvingSymlinksInPath().path
-                guard reResolved == resolved else {
+                let reResolved = itemURL.resolvingSymlinksInPath().path
+                guard reResolved == resolved, !hasUnexpectedSymlink(in: item.path) else {
                     let msg = "Aborting delete: path resolution changed between check and unlink for \(item.path)"
                     Logger.shared.log(msg, level: .warning)
                     result.errors.append(msg)
                     continue
                 }
 
-                try fileManager.removeItem(at: resolvedURL)
+                try fileManager.removeItem(at: itemURL)
                 result.freedSpace += item.size
                 result.itemsCleaned += 1
                 result.cleanedPaths.insert(item.path)
@@ -203,7 +212,13 @@ actor CleaningEngine {
 
         // Re-validate. Don't trust the caller — anything not on the allow-list
         // refuses to escalate.
+        let exclusions = CleanupExclusions.paths()
         let validated: [(item: CleanableItem, resolved: String)] = items.compactMap { item in
+            guard !CleanupExclusions.excludes(item.path, paths: exclusions) else { return nil }
+            guard !hasUnexpectedSymlink(in: item.path) else {
+                Logger.shared.log("Refusing admin escalation for symlinked path: \(item.path)", level: .warning)
+                return nil
+            }
             let resolved = URL(fileURLWithPath: item.path).resolvingSymlinksInPath().path
             let accepted: Bool = {
                 if item.category == .largeFiles {
@@ -258,26 +273,24 @@ actor CleaningEngine {
         do shell script "/usr/bin/xargs -0 /bin/rm -rf -- < \(quotedTempPath)" with administrator privileges
         """
 
-        let runResult: (success: Bool, error: String?) = await withCheckedContinuation { continuation in
+        let runError: String? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let appleScript = NSAppleScript(source: script)
                 var errorInfo: NSDictionary?
                 appleScript?.executeAndReturnError(&errorInfo)
                 if let errorInfo {
-                    continuation.resume(returning: (false, "\(errorInfo)"))
+                    continuation.resume(returning: "\(errorInfo)")
                 } else {
-                    continuation.resume(returning: (true, nil))
+                    continuation.resume(returning: nil)
                 }
             }
         }
 
-        guard runResult.success else {
-            // -128 is "user cancelled" — log quietly, no need for an error row.
-            if let err = runResult.error, !err.contains("-128") {
-                Logger.shared.log("Admin clean failed: \(err)", level: .error)
-                result.errors.append("Administrator authorization failed")
-            }
+        if let runError, runError.contains("-128") {
             return result
+        }
+        if let runError {
+            Logger.shared.log("Admin clean incomplete: \(runError)", level: .error)
         }
 
         // Verify which items actually disappeared. xargs may have reported a
@@ -513,9 +526,12 @@ actor CleaningEngine {
             "\(home)/Library/Developer/XCTestDevices",
             "\(home)/Library/Developer/Xcode/UserData/Previews",
             "\(home)/Library/org.swift.swiftpm",
+            "\(home)/Library/pnpm/store",
             "\(home)/.Trash",
             "\(home)/.npm",
+            "\(home)/.pnpm-store",
             "\(home)/.cache",
+            "\(home)/.local/share/pnpm/store",
             "\(home)/Library/Containers/com.docker.docker",
             // Docker/OrbStack cache + log roots surfaced by scanDockerCache.
             // Without these the items scan fine but every delete is refused
@@ -527,8 +543,11 @@ actor CleaningEngine {
             "\(home)/.orbstack/log",
             "/Library/Caches",
             "/Library/Logs",
+            "/opt/homebrew/Library/Caches",
+            "/usr/local/Homebrew/Library/Caches",
             "/private/var/log",
             "/private/var/tmp",
+            "/private/tmp",
             // /var is a symlink to /private/var, and resolvingSymlinksInPath
             // gives the /var form. Both spellings must be allow-listed or
             // every system log/tmp deletion silently fails the safety check.
@@ -712,6 +731,21 @@ actor CleaningEngine {
         if path == normalizedRoot { return true }
         let rootWithSeparator = normalizedRoot.hasSuffix("/") ? normalizedRoot : normalizedRoot + "/"
         return path.hasPrefix(rootWithSeparator)
+    }
+
+    private func hasUnexpectedSymlink(in path: String) -> Bool {
+        var url = URL(fileURLWithPath: path).standardizedFileURL
+        while url.path != "/" {
+            let current = url.path
+            let type = (try? fileManager.attributesOfItem(atPath: current)[.type]) as? FileAttributeType
+            if type == .typeSymbolicLink, current != "/tmp", current != "/var" {
+                return true
+            }
+            let parent = url.deletingLastPathComponent()
+            if parent.path == current { break }
+            url = parent
+        }
+        return false
     }
 
     private func shellSingleQuoted(_ value: String) -> String {

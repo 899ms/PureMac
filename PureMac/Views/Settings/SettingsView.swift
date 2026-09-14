@@ -235,6 +235,26 @@ struct CleaningSettingsView: View {
                 Button("Add Folder…") { addExcludedFolder() }
             }
 
+            Section("Cleanup Exclusions") {
+                Text("Excluded paths and folders containing them stay out of manual and scheduled cleanup. Right-click a cleanup result to exclude it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if appState.excludedCleanupPaths.isEmpty {
+                    Text("No excluded paths").foregroundStyle(.secondary)
+                }
+                ForEach(appState.excludedCleanupPaths, id: \.self) { path in
+                    HStack {
+                        Text((path as NSString).abbreviatingWithTildeInPath)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(path)
+                        Spacer()
+                        Button("Remove") { appState.removeCleanupExclusion(path) }
+                            .disabled(appState.scanState.isActive)
+                    }
+                }
+            }
+
             Section("Orphan Finder") {
                 HStack {
                     // Read the live count directly (it's a UserDefaults-backed

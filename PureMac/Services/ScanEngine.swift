@@ -34,6 +34,12 @@ actor ScanEngine {
         }
     }
 
+    enum NodeCacheManager: String, CaseIterable {
+        case npm
+        case yarn
+        case pnpm
+    }
+
     // MARK: - Public API
 
     func scanCategory(
@@ -62,11 +68,11 @@ actor ScanEngine {
         case .xcodeJunk:
             return scanXcodeJunk()
         case .brewCache:
-            return scanBrewCache()
+            return await scanBrewCache()
         case .nodeCache:
-            return scanNodeCache()
+            return await scanNodeCache()
         case .dockerCache:
-            return scanDockerCache()
+            return await scanDockerCache()
         case .universalBinaries:
             return scanUniversalBinaries()
         case .languageFiles:
@@ -139,6 +145,9 @@ actor ScanEngine {
             "\(home)/Library/Caches/Homebrew",
             "\(home)/Library/Caches/com.electron.ollama",
             "\(home)/Library/Caches/ollama",
+            "\(home)/Library/Caches/npm",
+            "\(home)/Library/Caches/Yarn",
+            "\(home)/Library/Caches/dev.kdrag0n.MacVirt",
         ] + ProviderPaths.deniedRoots).map(normalizePath))
 
         // Dynamically enumerate ~/Library/Caches/ so every subdirectory is visible
@@ -154,10 +163,7 @@ actor ScanEngine {
 
         // Also scan for npm/pip/yarn caches
         let devCaches = [
-            "\(home)/.npm/_cacache",
             "\(home)/.cache/pip",
-            "\(home)/.cache/yarn",
-            "\(home)/.cache/pnpm",
             "\(home)/Library/Caches/pip",
         ]
 
@@ -518,7 +524,7 @@ actor ScanEngine {
         return runtimes
     }
 
-    private func scanBrewCache() -> CategoryResult {
+    private func scanBrewCache() async -> CategoryResult {
         var items: [CleanableItem] = []
 
         // Default Homebrew download cache
@@ -543,22 +549,19 @@ actor ScanEngine {
         var detectedCustomCache = false
         for brewBin in brewBinPaths {
             guard fileManager.fileExists(atPath: brewBin) else { continue }
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: brewBin)
-            task.arguments = ["--cache"]
             var sanitizedEnv = ProcessInfo.processInfo.environment
             for key in Array(sanitizedEnv.keys) where key.hasPrefix("HOMEBREW_") {
                 sanitizedEnv.removeValue(forKey: key)
             }
-            task.environment = sanitizedEnv
-            let pipe = Pipe()
-            task.standardOutput = pipe
-            task.standardError = Pipe()
             do {
-                try task.run()
-                task.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                let result = try await BrewProcessRunner.run(
+                    executableURL: URL(fileURLWithPath: brewBin),
+                    arguments: ["--cache"],
+                    timeout: 10,
+                    environment: sanitizedEnv
+                )
+                if result.status == 0,
+                   let output = String(data: result.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !output.isEmpty {
                     let normalized = normalizePath(output)
                     let isKnown = knownBrewRoots.contains { root in
@@ -573,6 +576,8 @@ actor ScanEngine {
                     }
                     detectedCustomCache = true
                 }
+            } catch is CancellationError {
+                return CategoryResult(category: .brewCache, items: items, totalSize: 0)
             } catch {
                 Logger.shared.log("Failed to run \(brewBin) --cache: \(error.localizedDescription)", level: .warning)
             }
@@ -603,25 +608,22 @@ actor ScanEngine {
         return CategoryResult(category: .brewCache, items: items, totalSize: totalSize)
     }
 
-    private func scanNodeCache() -> CategoryResult {
-        // Each entry is `(displayName, defaultPath, optional CLI for cache-dir
-        // detection)`. The CLI invocation overrides `defaultPath` if the user
-        // has set a custom location (e.g. via `npm config set cache`).
+    private func scanNodeCache() async -> CategoryResult {
         struct ManagerCache {
             let name: String
-            let defaultPath: String
+            let manager: NodeCacheManager
             let detectionCommand: (cli: String, args: [String])?
         }
 
         let managers: [ManagerCache] = [
             ManagerCache(
                 name: String(localized: "npm cache"),
-                defaultPath: "\(home)/.npm",
+                manager: .npm,
                 detectionCommand: (cli: "npm", args: ["config", "get", "cache"])
             ),
             ManagerCache(
                 name: String(localized: "yarn classic cache"),
-                defaultPath: "\(home)/Library/Caches/Yarn",
+                manager: .yarn,
                 detectionCommand: (cli: "yarn", args: ["cache", "dir"])
             ),
             // Yarn Berry / v2+ uses a per-project .yarn/cache. We don't try to
@@ -630,7 +632,7 @@ actor ScanEngine {
             // global, safe-to-clean location.
             ManagerCache(
                 name: String(localized: "pnpm content-addressable store"),
-                defaultPath: "\(home)/Library/pnpm/store",
+                manager: .pnpm,
                 detectionCommand: (cli: "pnpm", args: ["store", "path"])
             ),
         ]
@@ -647,18 +649,33 @@ actor ScanEngine {
         ]
 
         for manager in managers {
-            var paths: [String] = []
-            paths.append(manager.defaultPath)
+            if Task.isCancelled { break }
+            var paths = Self.approvedNodeCacheRoots(for: manager.manager, home: home)
+                .compactMap {
+                    Self.validatedNodeCachePath($0, manager: manager.manager, home: home)
+                }
 
             if let cmd = manager.detectionCommand,
                let cliPath = locateExecutable(named: cmd.cli, searchPaths: cliSearchPaths),
-               let detected = runCommandReadingStdout(executable: cliPath, args: cmd.args) {
-                let normalized = detected.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !normalized.isEmpty,
-                   !paths.map(normalizePath).contains(normalizePath(normalized)) {
-                    paths.append(normalized)
+               let detected = await runCommandReadingStdout(executable: cliPath, args: cmd.args) {
+                if let validated = Self.validatedNodeCachePath(
+                    detected,
+                    manager: manager.manager,
+                    home: home
+                ) {
+                    if !paths.contains(validated) {
+                        paths.append(validated)
+                    }
+                } else {
+                    Logger.shared.log(
+                        "Refusing untrusted \(manager.manager.rawValue) cache path",
+                        level: .warning
+                    )
                 }
             }
+
+            if Task.isCancelled { break }
+            paths = Self.prunedNodeCachePaths(paths)
 
             for path in paths {
                 guard fileManager.fileExists(atPath: path) else { continue }
@@ -677,6 +694,71 @@ actor ScanEngine {
 
         let totalSize = items.reduce(0) { $0 + $1.size }
         return CategoryResult(category: .nodeCache, items: items, totalSize: totalSize)
+    }
+
+    nonisolated static func approvedNodeCacheRoots(
+        for manager: NodeCacheManager,
+        home: String
+    ) -> [String] {
+        let normalizedHome = (home as NSString).standardizingPath
+        switch manager {
+        case .npm:
+            return [
+                "\(normalizedHome)/.npm",
+                "\(normalizedHome)/Library/Caches/npm",
+            ]
+        case .yarn:
+            return [
+                "\(normalizedHome)/Library/Caches/Yarn",
+                "\(normalizedHome)/.cache/yarn",
+            ]
+        case .pnpm:
+            return [
+                "\(normalizedHome)/Library/pnpm/store",
+                "\(normalizedHome)/.local/share/pnpm/store",
+                "\(normalizedHome)/.pnpm-store",
+                "\(normalizedHome)/.cache/pnpm",
+            ]
+        }
+    }
+
+    nonisolated static func validatedNodeCachePath(
+        _ candidate: String,
+        manager: NodeCacheManager,
+        home: String
+    ) -> String? {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.hasPrefix("/"),
+              !trimmed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else { return nil }
+
+        let standardized = (trimmed as NSString).standardizingPath
+        let resolved = URL(fileURLWithPath: standardized, isDirectory: true)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        let approvedRoots = approvedNodeCacheRoots(for: manager, home: home)
+            .map { ($0 as NSString).standardizingPath }
+
+        guard approvedRoots.contains(where: { root in
+            resolved == root || resolved.hasPrefix(root + "/")
+        }) else { return nil }
+
+        return resolved
+    }
+
+    nonisolated static func prunedNodeCachePaths(_ paths: [String]) -> [String] {
+        var kept: [String] = []
+        for path in paths.sorted(by: {
+            if $0.count != $1.count { return $0.count < $1.count }
+            return $0.localizedStandardCompare($1) == .orderedAscending
+        }) {
+            if kept.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) {
+                continue
+            }
+            kept.append(path)
+        }
+        return kept
     }
 
     // -- Process helpers (used by scanNodeCache) --
@@ -701,26 +783,24 @@ actor ScanEngine {
         return nil
     }
 
-    private func runCommandReadingStdout(executable: String, args: [String]) -> String? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: executable)
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
+    private func runCommandReadingStdout(executable: String, args: [String]) async -> String? {
         do {
-            try task.run()
-            task.waitUntilExit()
+            let result = try await BrewProcessRunner.run(
+                executableURL: URL(fileURLWithPath: executable),
+                arguments: args,
+                timeout: 10
+            )
+            guard result.status == 0 else { return nil }
+            return String(data: result.stdout, encoding: .utf8)
+        } catch is CancellationError {
+            return nil
         } catch {
             Logger.shared.log("\(executable) \(args.joined(separator: " ")) failed: \(error.localizedDescription)", level: .warning)
             return nil
         }
-        guard task.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
     }
 
-    private func scanDockerCache() -> CategoryResult {
+    private func scanDockerCache() async -> CategoryResult {
         var items: [CleanableItem] = []
 
         // Docker Desktop on macOS keeps its VM disk + caches under
@@ -776,7 +856,8 @@ actor ScanEngine {
         // at these locations).
         let dockerBinPaths = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker"]
         for dockerBin in dockerBinPaths where fileManager.fileExists(atPath: dockerBin) {
-            if let reclaimable = reclaimableDockerSpace(dockerBin: dockerBin), reclaimable > 0 {
+            if Task.isCancelled { break }
+            if let reclaimable = await reclaimableDockerSpace(dockerBin: dockerBin), reclaimable > 0 {
                 items.append(CleanableItem(
                     name: String(localized: "Docker prune (stopped containers, dangling images, build cache)"),
                     path: "",
@@ -846,23 +927,23 @@ actor ScanEngine {
     /// Sum the reclaimable bytes reported by `docker system df --format json`.
     /// Returns nil when Docker isn't running or the command fails — callers
     /// should treat that as "no reclaimable info available", not as an error.
-    private func reclaimableDockerSpace(dockerBin: String) -> Int64? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: dockerBin)
-        task.arguments = ["system", "df", "--format", "{{.Reclaimable}}"]
-        let stdoutPipe = Pipe()
-        task.standardOutput = stdoutPipe
-        task.standardError = Pipe()
+    private func reclaimableDockerSpace(dockerBin: String) async -> Int64? {
+        let result: BrewProcessOutput
         do {
-            try task.run()
-            task.waitUntilExit()
+            result = try await BrewProcessRunner.run(
+                executableURL: URL(fileURLWithPath: dockerBin),
+                arguments: ["system", "df", "--format", "{{.Reclaimable}}"],
+                timeout: 10
+            )
+        } catch is CancellationError {
+            return nil
         } catch {
             Logger.shared.log("docker system df failed: \(error.localizedDescription)", level: .warning)
             return nil
         }
-        guard task.terminationStatus == 0 else { return nil }
-        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return nil }
+        guard result.status == 0,
+              let output = String(data: result.stdout, encoding: .utf8)
+        else { return nil }
         // Each line looks like e.g. "1.234GB (45%)" — parse the leading number.
         var total: Int64 = 0
         for line in output.split(separator: "\n") {

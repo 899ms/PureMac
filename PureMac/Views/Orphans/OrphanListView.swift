@@ -4,6 +4,8 @@ struct OrphanListView: View {
     @EnvironmentObject var appState: AppState
     @State private var selectedOrphans: Set<URL> = []
     @State private var isRemoving = false
+    @State private var showRemovalConfirmation = false
+    @State private var pendingRemoval: Set<URL> = []
     @State private var removalErrorMessage: String?
     /// Orphan sizes computed off the main thread. Orphans are exactly the large
     /// leftovers (multi-GB Caches/Containers/Application Support), and their
@@ -40,7 +42,10 @@ struct OrphanListView: View {
                                 NSPasteboard.general.setString(fileURL.path, forType: .string)
                             },
                             onIgnore: { ignoreOrphans([fileURL]) },
-                            onTrash: { Task { await removeSingleOrphan(fileURL) } }
+                            onTrash: {
+                                pendingRemoval = [fileURL]
+                                showRemovalConfirmation = true
+                            }
                         )
                         .transition(
                             reduceMotion
@@ -93,15 +98,24 @@ struct OrphanListView: View {
                     .disabled(isRemoving)
 
                     Button(removeSelectedLabel, role: .destructive) {
-                        Task {
-                            await removeSelectedOrphans()
-                        }
+                        pendingRemoval = selectedOrphans
+                        showRemovalConfirmation = true
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
                     .disabled(isRemoving)
                 }
             }
+        }
+        .confirmationDialog("Remove selected leftovers?", isPresented: $showRemovalConfirmation, titleVisibility: .visible) {
+            Button("Remove \(pendingRemoval.count) items", role: .destructive) {
+                let batch = pendingRemoval
+                pendingRemoval = []
+                Task { await removeSelectedOrphans(batch) }
+            }
+            Button("Cancel", role: .cancel) { pendingRemoval = [] }
+        } message: {
+            Text("Files will be moved to the Trash. Items requiring administrator authorization may be permanently deleted. App matching is a best-effort estimate; review files you recognize before removing them.")
         }
         .alert("Some files could not be removed", isPresented: Binding(
             get: { removalErrorMessage != nil },
@@ -145,11 +159,12 @@ struct OrphanListView: View {
         )
     }
 
-    private func removeSelectedOrphans() async {
+    private func removeSelectedOrphans(_ batch: Set<URL>) async {
+        guard !isRemoving else { return }
         isRemoving = true
         defer { isRemoving = false }
 
-        let urlsToRemove = selectedOrphans
+        let urlsToRemove = batch
         var failedPaths: [String] = []
         var removedURLs: Set<URL> = []
         var needsAdminURLs: [URL] = []
@@ -160,7 +175,8 @@ struct OrphanListView: View {
                 continue
             }
 
-            switch removeOrphan(url) {
+            let outcome = await Task.detached(priority: .userInitiated) { Self.removeOrphan(url) }.value
+            switch outcome {
             case .removed:
                 removedURLs.insert(url)
             case .needsAdmin:
@@ -171,7 +187,9 @@ struct OrphanListView: View {
         }
 
         if !needsAdminURLs.isEmpty {
-            if removeWithAdminPrivileges(needsAdminURLs) {
+            let adminURLs = needsAdminURLs
+            let adminSucceeded = await Task.detached(priority: .userInitiated) { Self.removeWithAdminPrivileges(adminURLs) }.value
+            if adminSucceeded {
                 for url in needsAdminURLs {
                     if !FileManager.default.fileExists(atPath: url.path) {
                         removedURLs.insert(url)
@@ -206,15 +224,16 @@ struct OrphanListView: View {
         }
     }
 
-    private enum OrphanRemoveOutcome {
+    private enum OrphanRemoveOutcome: Sendable {
         case removed
         case needsAdmin
         case failed
     }
 
-    private func removeOrphan(_ url: URL) -> OrphanRemoveOutcome {
+    private nonisolated static func removeOrphan(_ url: URL) -> OrphanRemoveOutcome {
+        guard OrphanSafetyPolicy.isSafeCandidate(url) else { return .failed }
         do {
-            try FileManager.default.removeItem(at: url)
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
             return .removed
         } catch {
             let nsError = error as NSError
@@ -252,14 +271,7 @@ struct OrphanListView: View {
         }
     }
 
-    private func removeSingleOrphan(_ url: URL) async {
-        let previous = selectedOrphans
-        selectedOrphans = [url]
-        await removeSelectedOrphans()
-        selectedOrphans = previous.subtracting([url])
-    }
-
-    private func removeWithAdminPrivileges(_ urls: [URL]) -> Bool {
+    private nonisolated static func removeWithAdminPrivileges(_ urls: [URL]) -> Bool {
         guard !urls.isEmpty else { return true }
         guard urls.allSatisfy({ OrphanSafetyPolicy.isSafeCandidate($0) }) else { return false }
 
