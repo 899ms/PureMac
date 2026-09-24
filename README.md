@@ -290,6 +290,10 @@ If PureMac saved you some disk space, a star helps other people find it.
 
 - **[Pesty](https://github.com/momenbasel/pesty)** - a free, open-source clipboard manager for macOS. Color-coded history, pinboards, instant search, keyboard-fast paste. Signed, notarized, `brew install --cask momenbasel/pesty/pesty`.
 
+## Also try
+
+[JMacy](https://jmacy.xyz) - the best and fastest downloader for macOS. Multi-connection segmented downloads that saturate your line, plus browser capture and torrents.
+
 ## License
 
 MIT. See [LICENSE](LICENSE). Use it, fork it, ship it under your own name if you want - the only thing the license asks is that the notice stays.
